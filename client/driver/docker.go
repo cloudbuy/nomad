@@ -2064,13 +2064,24 @@ func (h *DockerHandle) collectStats() {
 		select {
 		case s := <-statsCh:
 			if s != nil {
-				ms := &cstructs.MemoryStats{
-					RSS:      s.MemoryStats.Stats.Rss,
-					Cache:    s.MemoryStats.Stats.Cache,
-					Swap:     s.MemoryStats.Stats.Swap,
-					MaxUsage: s.MemoryStats.MaxUsage,
-					Measured: DockerMeasuredMemStats,
-				}
+				if runtime.GOOS != "windows" {
+					ms := &cstructs.MemoryStats{
+						RSS:      s.MemoryStats.Stats.Rss,
+						Cache:    s.MemoryStats.Stats.Cache,
+						Swap:     s.MemoryStats.Stats.Swap,
+						MaxUsage: s.MemoryStats.MaxUsage,
+						Measured: DockerMeasuredMemStats,
+					}
+				} else {
+					ms := &cstructs.MemoryStats{
+						RSS:      s.MemoryStats.PrivateWorkingSet,
+						Cache:    0,
+						Swap:     0,
+						Usage:    s.MemoryStats.Commit,
+						MaxUsage: s.MemoryStats.CommitPeak,
+						Measured: DockerMeasuredMemStats,
+					}
+					}
 
 				cs := &cstructs.CpuStats{
 					ThrottledPeriods: s.CPUStats.ThrottlingData.ThrottledPeriods,
@@ -2078,16 +2089,32 @@ func (h *DockerHandle) collectStats() {
 					Measured:         DockerMeasuredCpuStats,
 				}
 
-				// Calculate percentage
-				cs.Percent = calculatePercent(
-					s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage,
-					s.CPUStats.SystemCPUUsage, s.PreCPUStats.SystemCPUUsage, numCores)
-				cs.SystemMode = calculatePercent(
-					s.CPUStats.CPUUsage.UsageInKernelmode, s.PreCPUStats.CPUUsage.UsageInKernelmode,
-					s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage, numCores)
-				cs.UserMode = calculatePercent(
-					s.CPUStats.CPUUsage.UsageInUsermode, s.PreCPUStats.CPUUsage.UsageInUsermode,
-					s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage, numCores)
+				if runtime.GOOS != "windows" {
+					// Calculate percentage
+					cs.Percent = calculatePercent(
+						s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage,
+						s.CPUStats.SystemCPUUsage, s.PreCPUStats.SystemCPUUsage, numCores)
+					cs.SystemMode = calculatePercent(
+						s.CPUStats.CPUUsage.UsageInKernelmode, s.PreCPUStats.CPUUsage.UsageInKernelmode,
+						s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage, numCores)
+					cs.UserMode = calculatePercent(
+						s.CPUStats.CPUUsage.UsageInUsermode, s.PreCPUStats.CPUUsage.UsageInUsermode,
+						s.CPUStats.CPUUsage.TotalUsage, s.PreCPUStats.CPUUsage.TotalUsage, numCores)
+				} else {
+					// https://github.com/Microsoft/docker/blob/340e5233b2fb95981ddea610c1667134ed3b2376/integration-cli/docker_api_stats_test.go#L45
+					maxPossibleIntervals := uint64(s.Read.Sub(s.PreRead).Nanoseconds())
+					maxPossibleIntervals /= 100 // Adjust for Windows CPU values
+					maxPossibleIntervals *= uint64(s.NumProcs)
+
+					intervalsUsed := s.CPUStats.CPUUsage.TotalUsage - s.PreCPUStats.CPUUsage.TotalUsage
+					if maxPossibleIntervals > 0 {
+						cs.Percent = float64(totalCpuUsed) / float64(maxPossibleIntervals) * 100.0
+					} else {
+						cs.Percent = 0.0
+					}
+					cs.SystemMode = 0.0
+					cs.UserMode = 0.0
+				}
 				cs.TotalTicks = (cs.Percent / 100) * shelpers.TotalTicksAvailable() / float64(numCores)
 
 				h.resourceUsageLock.Lock()
